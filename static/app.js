@@ -139,7 +139,7 @@ function clearChatUI() {
   emptyEl.className = 'empty-state';
   emptyEl.id = 'empty';
   emptyEl.innerHTML = `
-    <div class="empty-icon">✦</div>
+    <img src="/static/chatnik.png" class="empty-icon" alt="Chatnik">
     <p class="empty-title">What can I help you with?</p>
     <p class="empty-sub">Ask anything — switch personas for different flavors of answers.</p>
     <div class="suggestions">
