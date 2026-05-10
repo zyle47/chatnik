@@ -5,14 +5,17 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 URL = "https://duck.ai/"
 ANSWER_WAIT_MS = 12_000
 DEBUG_DIR = Path(__file__).parent / "debug"
-
 PROFILE_DIR = Path(__file__).parent / "pw_profile"
 
 
-def _profile_dir() -> str:
+def _ensure_profile_dir() -> str:
     PROFILE_DIR.mkdir(exist_ok=True)
     return str(PROFILE_DIR)
 
+
+def _release_profile_locks():
+    for name in ("lock", "parent.lock", ".parentlock"):
+        (PROFILE_DIR / name).unlink(missing_ok=True)
 
 
 def _click_if_present(page, *labels, timeout=1500):
@@ -43,6 +46,8 @@ _TO_MARKDOWN_JS = r"""
         const tag = node.tagName.toLowerCase();
         if (tag === 'script' || tag === 'style' || tag === 'svg') return '';
 
+        // Skip the model-label heading duck.ai renders above each response
+        if (node.id && node.id.startsWith('heading-')) return '';
         // Skip citation widgets in-place (no DOM mutation)
         if (tag === 'button') return '';
         if (tag === 'a' && node.hasAttribute('aria-label')) return '';
@@ -110,7 +115,7 @@ _TO_MARKDOWN_JS = r"""
 
 def _extract_answer(page) -> str:
     """Return the last assistant message rendered as markdown, with citations stripped."""
-    bodies = page.locator(".space-y-4.whitespace-normal") # bodies = page.locator("[data-activeresponse]") # 
+    bodies = page.locator("[data-activeresponse]")
     n = bodies.count()
     if n:
         return bodies.nth(n - 1).evaluate(_TO_MARKDOWN_JS)
@@ -125,48 +130,140 @@ def _dump_debug(page, label: str) -> Path:
 
 
 class DuckSession:
-    def __init__(self, headless: bool = True, browser_name: str = "firefox"):
+    def __init__(self, headless: bool = True, browser_name: str = "firefox", use_profile: bool = False):
         self._pw = sync_playwright().start()
-        browser_type = getattr(self._pw, browser_name)
-        use_profile = not headless or PROFILE_DIR.exists()
-        if use_profile:
-            self._ctx = browser_type.launch_persistent_context(_profile_dir(), headless=headless)
+        self._browser_name = browser_name
+        self._use_profile = use_profile
+        self._turn = 0
+
+        self._open_browser(headless=headless)
+
+        textarea_ok = self._wait_for_input(timeout=15_000)
+        if not textarea_ok or self._is_captcha_present():
+            if headless and use_profile:
+                self._solve_captcha_visibly()
+            elif not textarea_ok:
+                self.close()
+                raise RuntimeError("Could not find duck.ai's input.")
+
+    def _open_browser(self, headless: bool):
+        browser_type = getattr(self._pw, self._browser_name)
+        if self._use_profile:
+            _ensure_profile_dir()
+            self._ctx = browser_type.launch_persistent_context(str(PROFILE_DIR), headless=headless)
             self.page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
             self._closer = self._ctx
         else:
             self._browser = browser_type.launch(headless=headless)
             self.page = self._browser.new_page()
             self._closer = self._browser
+
         self.page.goto(URL, wait_until="domcontentloaded")
         _click_if_present(self.page, "I agree", "Accept", "Continue", "Got it", "Next")
         _click_if_present(self.page, "I agree", "Accept", "Continue", "Got it", "Next")
+
+    def _is_captcha_present(self) -> bool:
+        return self.page.locator(
+            "[data-type='modal-overlay'], [data-testid*='anomaly-modal']"
+        ).count() > 0
+
+    def _wait_for_input(self, timeout: int = 15_000) -> bool:
         try:
-            self.page.locator("textarea").first.wait_for(state="visible", timeout=15_000)
+            self.page.locator("textarea").first.wait_for(state="visible", timeout=timeout)
+            return True
         except PlaywrightTimeout:
+            return False
+
+    def _solve_captcha_visibly(self):
+        print("[chatnik] CAPTCHA detected — closing headless, opening visible browser...")
+        self._closer.close()
+        _release_profile_locks()
+
+        browser_type = getattr(self._pw, self._browser_name)
+        ctx = browser_type.launch_persistent_context(str(PROFILE_DIR), headless=False)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto(URL, wait_until="domcontentloaded")
+
+        print("[chatnik] Solve the CAPTCHA in the browser window (up to 5 min)...")
+        try:
+            page.locator("textarea").first.wait_for(state="visible", timeout=300_000)
+            print("[chatnik] CAPTCHA solved! Closing visible browser...")
+            time.sleep(1)  # let Firefox flush cookies to disk
+        except PlaywrightTimeout:
+            ctx.close()
+            raise RuntimeError("CAPTCHA not solved within 5 minutes.")
+        finally:
+            ctx.close()
+
+        _release_profile_locks()
+        print("[chatnik] Reopening headless browser...")
+        self._open_browser(headless=True)
+
+        if not self._wait_for_input(timeout=15_000):
             self.close()
-            raise RuntimeError("Could not find duck.ai's input.")
-        self._turn = 0
+            raise RuntimeError("Could not find duck.ai's input after CAPTCHA solve.")
+
+        print("[chatnik] Headless browser ready.")
+
+    def _wait_for_response(self, before_count: int, timeout_ms: int = ANSWER_WAIT_MS) -> bool:
+        deadline = time.time() + timeout_ms / 1000
+        appeared = False
+        last_text: str | None = None
+        stable_ticks = 0
+
+        while time.time() < deadline:
+            bodies = self.page.locator("[data-activeresponse]")
+            n = bodies.count()
+
+            if not appeared:
+                if n > before_count:
+                    appeared = True
+            else:
+                # aria-busy means duck.ai is still generating
+                if self.page.locator("[aria-busy='true']").count() > 0:
+                    stable_ticks = 0
+                    last_text = None
+                else:
+                    try:
+                        text = bodies.nth(n - 1).inner_text()
+                        if text and "Generating" not in text:
+                            if text == last_text:
+                                stable_ticks += 1
+                                if stable_ticks >= 2:
+                                    self.page.wait_for_timeout(300)
+                                    return True
+                            else:
+                                stable_ticks = 0
+                                last_text = text
+                        else:
+                            stable_ticks = 0
+                    except Exception:
+                        pass
+
+            time.sleep(0.4)
+
+        return appeared
 
     def ask(self, prompt: str, debug: bool = False) -> str:
         self._turn += 1
         textarea = self.page.locator("textarea").first
+        try:
+            textarea.wait_for(state="visible", timeout=8_000)
+        except PlaywrightTimeout:
+            if self._use_profile:
+                self._solve_captcha_visibly()
+            else:
+                raise RuntimeError("textarea disappeared mid-session")
+        else:
+            if self._is_captcha_present() and self._use_profile:
+                self._solve_captcha_visibly()
+
+        before = self.page.locator("[data-activeresponse]").count()
         textarea.fill(prompt)
         textarea.press("Enter")
 
-        # Wait for the response to finish streaming (text stabilizes for 2 ticks)
-        deadline = time.time() + ANSWER_WAIT_MS / 1000
-        last = ""
-        stable = 0
-        while time.time() < deadline:
-            time.sleep(0.4)
-            cur = _extract_answer(self.page)
-            if cur and cur != "Generating response" and cur == last:
-                stable += 1
-                if stable >= 2:
-                    break
-            else:
-                stable = 0
-                last = cur
+        if not self._wait_for_response(before):
+            self.page.wait_for_timeout(ANSWER_WAIT_MS)
 
         answer = _extract_answer(self.page)
 
@@ -177,12 +274,6 @@ class DuckSession:
             else:
                 print(f"(debug DOM saved → {dump})")
         return answer
-
-    def new_chat(self):
-        self.page.keyboard.press("Control+Shift+O")
-        self.page.wait_for_timeout(700)
-        self.page.locator("textarea").first.wait_for(state="visible", timeout=10_000)
-        self._turn = 0
 
     def close(self):
         try:

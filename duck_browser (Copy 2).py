@@ -178,12 +178,6 @@ class DuckSession:
                 print(f"(debug DOM saved → {dump})")
         return answer
 
-    def new_chat(self):
-        self.page.keyboard.press("Control+Shift+O")
-        self.page.wait_for_timeout(700)
-        self.page.locator("textarea").first.wait_for(state="visible", timeout=10_000)
-        self._turn = 0
-
     def close(self):
         try:
             self._closer.close()
