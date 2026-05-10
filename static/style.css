@@ -56,13 +56,9 @@ body > * { position: relative; z-index: 1; }
 .logo-icon {
   width: 28px;
   height: 28px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
   border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.85rem;
   flex-shrink: 0;
+  object-fit: cover;
   box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
@@ -332,16 +328,9 @@ body > * { position: relative; z-index: 1; }
 }
 
 .empty-icon {
-  width: 62px;
-  height: 62px;
-  background: linear-gradient(135deg, rgba(59,130,246,0.12), rgba(139,92,246,0.14));
-  border: 1px solid rgba(99,102,241,0.22);
-  border-radius: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.9rem;
-  box-shadow: 0 0 30px rgba(99,102,241,0.12);
+  width: 210px;
+  height: 210px;
+  object-fit: contain;
 }
 
 .empty-title {

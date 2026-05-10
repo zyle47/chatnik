@@ -15,7 +15,7 @@ A small headless-Firefox bridge to [duck.ai](https://duck.ai), wrapped behind Fa
 ### 1. System requirements
 
 - Python 3.10+
-- Linux/macOS (the Firefox-profile path is hard-coded for Snap-installed Firefox on Linux — see step 4)
+- Linux/macOS/Windows
 - ~300 MB free for Playwright's bundled Firefox
 
 ### 2. Clone and create a venv
@@ -36,35 +36,24 @@ playwright install firefox
 
 (Optional: `playwright install chromium` if you want to try the `--browser chromium` CLI flag.)
 
-### 4. Firefox profile (only needed if duck.ai bot-challenges you)
+### 4. First run — solve the CAPTCHA (if duck.ai challenges you)
 
-duck.ai has been letting plain Playwright Firefox through, so you can usually skip this. If you ever see a Cloudflare CAPTCHA, the workaround is to launch with a **copy of your real Firefox profile** so cookies / fingerprint look human.
+Duck.ai usually lets Playwright through without issues. But if you hit a Cloudflare CAPTCHA on the first run, do this once:
 
-The profile path is currently hard-coded in [duck_browser.py](duck_browser.py):
-
+**In [app.py](app.py), line ~187, temporarily change:**
 ```python
-DEFAULT_FIREFOX_PROFILE = Path.home() / "snap/firefox/common/.mozilla/firefox/itb0s38f.default-1760976178135"
+worker = BrowserWorker(headless=True)   # normal
+```
+**to:**
+```python
+worker = BrowserWorker(headless=False)  # visible browser — solve CAPTCHA here
 ```
 
-That points at **Snap-installed Firefox on Linux** with a specific profile folder name. On another machine you'll need to update it. Find your profile by running:
+Then start the server, solve the CAPTCHA in the browser window that pops up, and close the window. A `pw_profile/` folder is created next to `app.py` — this saves the session so you won't be challenged again.
 
-```bash
-# Linux (Snap)
-cat ~/snap/firefox/common/.mozilla/firefox/profiles.ini
+**Change the line back to `headless=True`** and restart. From now on, if `pw_profile/` exists, it gets reused automatically — no more CAPTCHA.
 
-# Linux (apt / native)
-cat ~/.mozilla/firefox/profiles.ini
-
-# Linux (Flatpak)
-cat ~/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini
-
-# macOS
-cat ~/Library/Application\ Support/Firefox/profiles.ini
-```
-
-Look for the `[Profile0]` block with `Default=1`. Copy its `Path=` value and prepend the directory the `profiles.ini` lives in. Update `DEFAULT_FIREFOX_PROFILE` in `duck_browser.py` accordingly.
-
-**Important:** close your real Firefox before the first profile-using run. Chatnik copies the profile to `./fox_profile/` (skipping caches and lock files) and reuses that copy on subsequent runs — your real profile is never touched after the initial copy.
+> `pw_profile/` is in `.gitignore`. Don't commit it.
 
 ### 5. Run the API + UI
 
@@ -117,4 +106,4 @@ Available out of the box: `c`, `python`, `joker`, `teacher`, `senior`.
 | Cloudflare CAPTCHA loop on duck.ai | Use `--profile` (CLI) or call the persistent-context path; close your real Firefox first |
 | Empty answer / `[no selector matched]` | Duck.ai changed the DOM. Re-run with `--debug` and update selectors in `duck_browser.py` |
 | Code blocks render as paragraphs | The persona didn't follow the formatting rules — usually clears up after a couple of turns; or click duck.ai's "New Chat" mentally and reload |
-| `Firefox profile not found at ...` | Edit `DEFAULT_FIREFOX_PROFILE` in `duck_browser.py` for your machine (see step 4) |
+| CAPTCHA keeps appearing after first run | Make sure `pw_profile/` exists (created on first `headless=False` run); don't delete it |
